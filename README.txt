@@ -1,0 +1,1 @@
+notes and exercise of learning Python
