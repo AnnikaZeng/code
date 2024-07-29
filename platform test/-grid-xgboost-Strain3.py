@@ -8,7 +8,7 @@ from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import KNNImputer, IterativeImputer
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV
 from scipy import stats
 
 # 设置 Matplotlib 支持中文显示
@@ -52,22 +52,18 @@ full_imputed_data = iterative_imputer.fit_transform(knn_imputed_data)
 # 将完全插补后的数据转换回 DataFrame
 full_imputed_data = pd.DataFrame(full_imputed_data, columns=data_to_impute.columns)
 
-# # 异常值处理
-# columns_to_check = full_imputed_data.columns.drop(
-#     ["环境得分（华证）"]
-# )  # 排除“环境得分（华证）”
-# for column in columns_to_check:
-#     z_scores = np.abs(stats.zscore(full_imputed_data[column]))
-#     outliers = z_scores > 3
-#     # 用中位数替换异常值
-#     median_val = np.median(full_imputed_data.loc[~outliers, column])
-#     full_imputed_data.loc[outliers, column] = median_val
+# 异常值处理
+columns_to_check = full_imputed_data.columns.drop(["社会维度得分"])
+for column in columns_to_check:
+    z_scores = np.abs(stats.zscore(full_imputed_data[column]))
+    outliers = z_scores > 3
+    # 用中位数替换异常值
+    median_val = np.median(full_imputed_data.loc[~outliers, column])
+    full_imputed_data.loc[outliers, column] = median_val
 
 # 特征选择和目标变量
 X = full_imputed_data.drop(
-    columns=[
-        "社会维度得分",
-    ]
+    columns=["社会维度得分", "净利润纳税率（%）", "研发总额占营业收入比例"]
 )
 y = full_imputed_data["社会维度得分"]
 
@@ -81,17 +77,45 @@ scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train)
 X_test_scaled = scaler.transform(X_test)
 
-# 创建并训练 XGBoost 模型
-model = xgb.XGBRegressor(
-    objective="reg:squarederror",
-    colsample_bytree=0.3,
-    learning_rate=0.1,
-    max_depth=5,
-    alpha=10,
-    n_estimators=100,
-)
-model.fit(X_train_scaled, y_train)
+# 创建XGBoost模型
+xgb_model = xgb.XGBRegressor(objective="reg:squarederror")
 
+# 设置要调优的超参数
+# parameters = {
+#     "colsample_bytree": [0.3, 0.5, 0.7],
+#     "learning_rate": [0.01, 0.05, 0.1],
+#     "max_depth": [3, 5, 7],
+#     "alpha": [1, 5, 10],
+#     "n_estimators": [50, 100, 200],
+# }
+param_grid = {
+    "colsample_bytree": [0.7, 0.8, 0.9],  # 围绕最优值 0.8
+    "learning_rate": [0.05, 0.1],  # 围绕最优值 0.05
+    "max_depth": [3, 5, 7],  # 围绕最优值 6
+    "alpha": [1, 5],  # 围绕最优值 5
+    "n_estimators": [100, 200],  # 围绕最优值 100
+    "subsample": [0.4, 0.5, 0.6],  # 围绕最优值 0.5
+    "min_child_weight": [2, 3, 4],  # 围绕最优值 3
+}
+
+# 使用网格搜索进行调优
+grid_search = GridSearchCV(
+    estimator=xgb_model,
+    param_grid=param_grid,
+    cv=3,  # 3折交叉验证
+    scoring="neg_mean_squared_error",  # 使用负均方误差作为评分标准
+    verbose=1,  # 日志显示详细程度
+    n_jobs=-1,  # 使用所有可用的CPU核心
+)
+grid_search.fit(X_train_scaled, y_train)
+
+# 打印最优参数和得分
+print("最佳参数：", grid_search.best_params_)
+best_score = np.sqrt(-grid_search.best_score_)
+print("最佳得分的RMSE：", best_score)
+
+# 使用最佳参数的模型进行预测
+model = grid_search.best_estimator_
 
 # 预测
 y_pred = model.predict(X_test_scaled)
@@ -119,18 +143,4 @@ plt.barh(X.columns[sorted_idx], feature_importances[sorted_idx], color="skyblue"
 plt.xlabel("Importance")
 plt.title("Feature Importances")
 plt.gca().invert_yaxis()
-plt.show()
-
-# 可视化特征重要性
-explainer = shap.TreeExplainer(model)
-shap_values = explainer.shap_values(X_test_scaled)
-shap.summary_plot(shap_values, X_test_scaled)
-
-# 比较实际值与预测值
-plt.figure(figsize=(10, 6))
-plt.scatter(y_test, y_pred, alpha=0.75, color="red")
-plt.xlabel("实际")
-plt.ylabel("预测")
-plt.title("实际值 vs 预测值")
-plt.plot([y.min(), y.max()], [y.min(), y.max()], "k--", lw=4)
 plt.show()

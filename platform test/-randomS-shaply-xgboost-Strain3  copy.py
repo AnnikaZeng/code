@@ -8,11 +8,11 @@ from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import KNNImputer, IterativeImputer
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from scipy import stats
 
 # 设置 Matplotlib 支持中文显示
-plt.rcParams["font.sans-serif"] = ["Microsoft YaHei"]
+plt.rcParams["font.sans-serif"] = ["SimHei"]
 plt.rcParams["axes.unicode_minus"] = False
 
 # 加载数据
@@ -52,22 +52,18 @@ full_imputed_data = iterative_imputer.fit_transform(knn_imputed_data)
 # 将完全插补后的数据转换回 DataFrame
 full_imputed_data = pd.DataFrame(full_imputed_data, columns=data_to_impute.columns)
 
-# # 异常值处理
-# columns_to_check = full_imputed_data.columns.drop(
-#     ["环境得分（华证）"]
-# )  # 排除“环境得分（华证）”
-# for column in columns_to_check:
-#     z_scores = np.abs(stats.zscore(full_imputed_data[column]))
-#     outliers = z_scores > 3
-#     # 用中位数替换异常值
-#     median_val = np.median(full_imputed_data.loc[~outliers, column])
-#     full_imputed_data.loc[outliers, column] = median_val
+# 异常值处理
+columns_to_check = full_imputed_data.columns.drop(["社会维度得分"])
+for column in columns_to_check:
+    z_scores = np.abs(stats.zscore(full_imputed_data[column]))
+    outliers = z_scores > 3
+    # 用中位数替换异常值
+    median_val = np.median(full_imputed_data.loc[~outliers, column])
+    full_imputed_data.loc[outliers, column] = median_val
 
 # 特征选择和目标变量
 X = full_imputed_data.drop(
-    columns=[
-        "社会维度得分",
-    ]
+    columns=["社会维度得分", "净利润纳税率（%）", "研发总额占营业收入比例"]
 )
 y = full_imputed_data["社会维度得分"]
 
@@ -81,20 +77,43 @@ scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train)
 X_test_scaled = scaler.transform(X_test)
 
-# 创建并训练 XGBoost 模型
-model = xgb.XGBRegressor(
-    objective="reg:squarederror",
-    colsample_bytree=0.3,
-    learning_rate=0.1,
-    max_depth=5,
-    alpha=10,
-    n_estimators=100,
+# 创建XGBoost模型
+model = xgb.XGBRegressor(objective="reg:squarederror")
+
+# 设置要测试的不同超参数
+param_dist = {
+    "colsample_bytree": [0.4, 0.6, 0.8, 1.0],
+    "learning_rate": [0.05, 0.1],
+    "max_depth": [4, 6, 8, 10],
+    "alpha": [1, 5, 10],
+    "n_estimators": [100, 200],
+    "subsample": [0.5, 0.7, 1.0],
+    "min_child_weight": [1, 3, 5],
+    "lambda": [1, 2, 3],
+}
+
+# 创建 RandomizedSearchCV 实例
+random_search = RandomizedSearchCV(
+    estimator=model,
+    param_distributions=param_dist,
+    n_iter=50,  # 试验50个不同的参数组合
+    scoring="neg_mean_squared_error",
+    cv=3,  # 3折交叉验证
+    verbose=2,
+    random_state=42,
+    n_jobs=-1,  # 使用所有可用的CPU核心
 )
-model.fit(X_train_scaled, y_train)
 
+# 进行模型拟合
+random_search.fit(X_train_scaled, y_train)
 
-# 预测
-y_pred = model.predict(X_test_scaled)
+print("最佳参数：", random_search.best_params_)
+print("最佳得分（负MSE）：", random_search.best_score_)
+
+# 使用最佳模型进行预测
+best_model = random_search.best_estimator_
+y_pred = best_model.predict(X_test_scaled)
+
 
 # 模型评估
 rmse = np.sqrt(mean_squared_error(y_test, y_pred))
@@ -105,7 +124,7 @@ print("MAE: ", mae)
 print("R²: ", r2)
 
 # 使用 XGBoost 的 feature_importances_ 获取特征重要性
-feature_importances = model.feature_importances_
+feature_importances = best_model.feature_importances_
 sorted_idx = np.argsort(feature_importances)[::-1]
 
 # 打印重要的特征
@@ -121,16 +140,16 @@ plt.title("Feature Importances")
 plt.gca().invert_yaxis()
 plt.show()
 
-# 可视化特征重要性
-explainer = shap.TreeExplainer(model)
-shap_values = explainer.shap_values(X_test_scaled)
-shap.summary_plot(shap_values, X_test_scaled)
+# # 可视化特征重要性
+# explainer = shap.TreeExplainer(best_model)
+# shap_values = explainer.shap_values(X_test_scaled)
+# shap.summary_plot(shap_values, X_test_scaled)
 
-# 比较实际值与预测值
-plt.figure(figsize=(10, 6))
-plt.scatter(y_test, y_pred, alpha=0.75, color="red")
-plt.xlabel("实际")
-plt.ylabel("预测")
-plt.title("实际值 vs 预测值")
-plt.plot([y.min(), y.max()], [y.min(), y.max()], "k--", lw=4)
-plt.show()
+# # 比较实际值与预测值
+# plt.figure(figsize=(10, 6))
+# plt.scatter(y_test, y_pred, alpha=0.75, color="red")
+# plt.xlabel("实际")
+# plt.ylabel("预测")
+# plt.title("实际值 vs 预测值")
+# plt.plot([y.min(), y.max()], [y.min(), y.max()], "k--", lw=4)
+# plt.show()
